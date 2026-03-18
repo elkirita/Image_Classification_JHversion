@@ -64,10 +64,10 @@ class ImageClassificationHelper(
     companion object {
         private const val TAG = "ImageClassification"
 
-        val DEFAULT_MODEL = Model.EfficientNetLite0
+        val DEFAULT_MODEL = Model.Custom
         val DEFAULT_DELEGATE = Delegate.CPU
         const val DEFAULT_RESULT_COUNT = 3
-        const val DEFAULT_THRESHOLD = 0.3f
+        const val DEFAULT_THRESHOLD = 0.1f
         const val DEFAULT_THREAD_COUNT = 2
 
     }
@@ -95,7 +95,7 @@ class ImageClassificationHelper(
                 numThreads = options.threadCount
                 useNNAPI = options.delegate == Delegate.NNAPI
             }
-            labels = getModelMetadata(litertBuffer)
+            labels = FileUtil.loadLabels(context, "labels.txt")
             Interpreter(litertBuffer, options)
         } catch (e: Exception) {
             Log.i(TAG, "Create TFLite from ${options.model.fileName} is failed ${e.message}")
@@ -193,7 +193,7 @@ class ImageClassificationHelper(
     }
 
     enum class Model(val fileName: String) {
-        EfficientNetLite0("efficientnet_lite0.tflite"), EfficientNetLite2("efficientnet_lite2.tflite")
+        Custom("model.tflite")
     }
 
     data class ClassificationResult(

@@ -1,4 +1,4 @@
-tasks.register('downloadEfficientnetLite0Model', Download) {
+/*tasks.register('downloadEfficientnetLite0Model', Download) {
     src 'https://storage.googleapis.com/ai-edge/interpreter-samples/image_classification/android/efficientnet_lite0.tflite'
     dest project.ext.ASSET_DIR + '/efficientnet_lite0.tflite'
     overwrite false
@@ -13,3 +13,5 @@ tasks.register('downloadEfficientnetLite2Model', Download) {
 }
 
 preBuild.dependsOn downloadEfficientnetLite0Model, downloadEfficientnetLite2Model
+*/
+
