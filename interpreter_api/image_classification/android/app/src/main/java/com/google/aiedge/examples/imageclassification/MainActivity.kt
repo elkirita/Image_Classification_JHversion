@@ -19,6 +19,9 @@ package com.google.aiedge.examples.imageclassification
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -58,7 +61,10 @@ import androidx.compose.material.TopAppBar
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -75,19 +81,88 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import com.google.aiedge.examples.imageclassification.view.ApplicationTheme
 import com.google.aiedge.examples.imageclassification.view.CameraScreen
 import com.google.aiedge.examples.imageclassification.view.GalleryScreen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.http.Body
+import retrofit2.http.Header
+import retrofit2.http.POST
 import java.util.Locale
 
+// --- Clases para la API de OpenAI ---
+data class OpenAIRequest(val model: String = "gpt-3.5-turbo", val messages: List<Message>)
+data class Message(val role: String, val content: String)
+data class OpenAIResponse(val choices: List<Choice>)
+data class Choice(val message: Message)
+
+interface OpenAIService {
+    @POST("v1/chat/completions")
+    suspend fun getCompletion(
+        @Header("Authorization") token: String,
+        @Body request: OpenAIRequest
+    ): OpenAIResponse
+}
+// ------------------------------------
 
 class MainActivity : ComponentActivity() {
+    private var textToSpeech: TextToSpeech? = null
+    private var lastSpokenLabel: String? = null
+    private var isTtsSpeaking = false
+    
+    // Mapeo de nombres de lugares para la API
+    private val mapaLugares = mapOf(
+        "Facultad de Ciencias Agrarias" to "agrarias",
+        "Facultad de Ciencias Pecuarias" to "pecuaria",
+        "FCIP" to "fcip",
+        "TICs" to "tics",
+        "Rectorado" to "rectorado",
+        "Administrativo" to "administrativo",
+        "Facultad de Ciencias Empresariales" to "empresarial",
+        "Auditorio de La María" to "auditorio_la_maria",
+        "Laboratorios de La María" to "laboratorios_la_maria",
+        "Facultad de salud" to "facultad_de_salud",
+        "Polideportivo" to "polídeportivo",
+        "Biblioteca" to "biblioteca",
+        "Cafeteria" to "cafeteria",
+        "Facultad Ciencias Sociales Economicas" to "facultad_ciencias_sociales_economicas",
+        "FCCDD" to "fccdd",
+        "Parqueadero" to "parqueadero"
+    )
+
+    private val openAIService by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://api.openai.com/")
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(OpenAIService::class.java)
+    }
+
     @OptIn(ExperimentalMaterialApi::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Inicializar TTS con listener
+        textToSpeech = TextToSpeech(this) { status ->
+            if (status != TextToSpeech.ERROR) {
+                textToSpeech?.language = Locale("es", "ES")
+                textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) { isTtsSpeaking = true }
+                    override fun onDone(utteranceId: String?) { isTtsSpeaking = false }
+                    override fun onError(utteranceId: String?) { isTtsSpeaking = false }
+                })
+            }
+        }
+
         val viewModel: MainViewModel by viewModels { MainViewModel.getFactory(this) }
         setContent {
             var tabState by remember { mutableStateOf(Tab.Camera) }
+            var isScanningPaused by remember { mutableStateOf(false) }
 
             var mediaUriState: Uri by remember {
                 mutableStateOf(Uri.EMPTY)
@@ -100,6 +175,18 @@ class MainActivity : ComponentActivity() {
 
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
+            // Lógica para hablar cuando se detecta un objeto usando OpenAI
+            LaunchedEffect(uiState.categories, isScanningPaused) {
+                if (!isScanningPaused && !isTtsSpeaking) {
+                    val topCategory = uiState.categories.firstOrNull { it.score > 0.7f }
+                    if (topCategory != null && topCategory.label != lastSpokenLabel) {
+                        lastSpokenLabel = topCategory.label
+                        val nombreClave = mapaLugares[topCategory.label] ?: topCategory.label
+                        obtenerInformacionDeOpenAI(topCategory.label, nombreClave)
+                    }
+                }
+            }
+
             LaunchedEffect(uiState.errorMessage) {
                 if (uiState.errorMessage != null) {
                     Toast.makeText(
@@ -108,6 +195,14 @@ class MainActivity : ComponentActivity() {
                     viewModel.errorMessageShown()
                 }
             }
+
+            DisposableEffect(Unit) {
+                onDispose {
+                    textToSpeech?.stop()
+                    textToSpeech?.shutdown()
+                }
+            }
+
             ApplicationTheme {
                 BottomSheetScaffold(sheetPeekHeight = (90 + 20 * uiState.categories.size).dp,
                     sheetContent = {
@@ -129,7 +224,27 @@ class MainActivity : ComponentActivity() {
                                     val request = PickVisualMediaRequest()
                                     galleryLauncher.launch(request)
                                 }) {
-                                Icon(Icons.Filled.Add, contentDescription = null)
+                                Icon(Icons.Filled.Add, contentDescription = "Seleccionar Imagen")
+                            }
+                        } else {
+                            FloatingActionButton(
+                                backgroundColor = if (isScanningPaused) Color.Green else Color.Red,
+                                shape = CircleShape,
+                                onClick = {
+                                    isScanningPaused = !isScanningPaused
+                                    if (isScanningPaused) {
+                                        textToSpeech?.stop() 
+                                        isTtsSpeaking = false
+                                    } else {
+                                        // Al reanudar, limpiamos el historial para que vuelva a detectar de inmediato
+                                        lastSpokenLabel = null
+                                    }
+                                }) {
+                                Icon(
+                                    imageVector = if (isScanningPaused) Icons.Filled.PlayArrow else Icons.Filled.Close,
+                                    contentDescription = if (isScanningPaused) "Reanudar escaneo" else "Detener escaneo",
+                                    tint = Color.White
+                                )
                             }
                         }
                     }) {
@@ -141,17 +256,69 @@ class MainActivity : ComponentActivity() {
                             onTabChanged = {
                                 tabState = it
                                 viewModel.stopClassify()
+                                lastSpokenLabel = null 
                             },
                             onImageProxyAnalyzed = { imageProxy ->
-                                viewModel.classify(imageProxy)
+                                if (!isScanningPaused) {
+                                    viewModel.classify(imageProxy)
+                                } else {
+                                    imageProxy.close()
+                                }
                             },
                             onImageBitMapAnalyzed = { bitmap, degrees ->
-                                viewModel.classify(bitmap, degrees)
+                                if (!isScanningPaused || tabState == Tab.Gallery) {
+                                    viewModel.classify(bitmap, degrees)
+                                }
                             })
                     }
                 }
             }
         }
+    }
+
+    private fun obtenerInformacionDeOpenAI(nombreVisible: String, nombreClave: String) {
+        lifecycleScope.launch {
+            try {
+                val prompt = """
+                    Actúa como un guía turístico universitario.
+                    Usa únicamente la información recuperada del vector store asociada a "$nombreClave".
+                    Presenta el lugar de forma atractiva, clara y natural.
+                    No inventes datos que no estén en los documentos.
+                    Incluye:
+                    - una introducción breve,
+                    - lo más interesante del lugar,
+                    - sus características, servicios o instalaciones importantes,
+                    - y un cierre invitando a conocerlo.
+
+                    Lugar solicitado: $nombreVisible
+                """.trimIndent()
+                
+                val response = withContext(Dispatchers.IO) {
+                    openAIService.getCompletion(
+                        "Bearer ${BuildConfig.API_KEY}",
+                        OpenAIRequest(messages = listOf(Message("user", prompt)))
+                    )
+                }
+                
+                val info = response.choices.firstOrNull()?.message?.content 
+                    ?: "He detectado $nombreVisible, pero no tengo información adicional."
+                
+                hablar(info)
+            } catch (e: Exception) {
+                Log.e("OpenAI", "Error detallado: ${e.message}")
+                if (e.message?.contains("401") == true) {
+                    hablar("Error de autenticación con la llave de inteligencia artificial.")
+                } else {
+                    hablar("He detectado $nombreVisible")
+                }
+            }
+        }
+    }
+
+    private fun hablar(texto: String) {
+        val params = Bundle()
+        params.putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, "guia_id")
+        textToSpeech?.speak(texto, TextToSpeech.QUEUE_FLUSH, params, "guia_id")
     }
 
     @Composable
