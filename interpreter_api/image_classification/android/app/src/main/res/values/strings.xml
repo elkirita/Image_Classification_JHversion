@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">Image Classification</string>
+    <string name="app_name">UTEQ Vision</string>
     <string name="inference_title">Inference Time</string>
     <string name="inference_value">%d ms</string>
     <string name="delegate">Delegate</string>
